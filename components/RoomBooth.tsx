@@ -26,7 +26,7 @@ import CameraStage from "./CameraStage";
 import { Chip, ChipRow, Section } from "./ui";
 
 const COUNTDOWN_SECONDS = 3;
-const LEAD_MS = 5000; // now → first shot
+const LEAD_MS = 5000; // now  first shot
 const SHOT_PAUSE_MS = 700;
 const FLASH_MS = 170;
 const COLLECT_TIMEOUT_MS = 25000; // backstop: build with whatever arrived
@@ -475,7 +475,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:py-8">
       <header className="mb-5 flex items-center justify-between">
         <Link href="/" className="text-sm text-white/50 transition hover:text-white/80">
-          ← Home
+           Home
         </Link>
         <h1 className="text-lg font-semibold tracking-tight">
           Room <span className="font-mono text-pink-300">{room.code}</span>
@@ -484,7 +484,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        {/* LEFT — self view / preview */}
+        {/* LEFT - self view / preview */}
         <div className="flex min-w-0 flex-col gap-4">
           {phase === "styling" ? (
             styleUrl ? (
@@ -496,12 +496,12 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
               />
             ) : (
               <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white/60">
-                Developing your photo…
+                Developing your photo
               </div>
             )
           ) : phase === "processing" ? (
             <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-6 text-center text-white/60">
-              Got everyone&apos;s shots — putting it together…
+              Got everyone&apos;s shots - putting it together
             </div>
           ) : (
             <CameraStage
@@ -534,7 +534,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                         disabled={camStatus === "requesting"}
                         className="btn-primary"
                       >
-                        {camStatus === "requesting" ? "Starting…" : "Enable camera"}
+                        {camStatus === "requesting" ? "Starting" : "Enable camera"}
                       </button>
                     </>
                   )}
@@ -568,7 +568,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
           )}
         </div>
 
-        {/* RIGHT — controls */}
+        {/* RIGHT - controls */}
         <aside className="flex flex-col gap-5">
           {phase === "lobby" && (
             <>
@@ -583,7 +583,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                   disabled={!cameraReady}
                   className={cn("w-full", ready ? "btn-secondary" : "btn-primary")}
                 >
-                  {ready ? "✓ Ready" : cameraReady ? "I'm ready" : "Enable camera first"}
+                  {ready ? " Ready" : cameraReady ? "I'm ready" : "Enable camera first"}
                 </button>
               </Section>
 
@@ -636,12 +636,12 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                     disabled={readyIds.length === 0}
                     className="btn-primary w-full py-3"
                   >
-                    Start shoot · {readyIds.length} ready
+                    Start shoot  {readyIds.length} ready
                   </button>
                 </>
               ) : (
                 <p className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
-                  Format: <b>{layout.name}</b>. Tap <b>Ready</b> when your camera&apos;s on — the
+                  Format: <b>{layout.name}</b>. Tap <b>Ready</b> when your camera&apos;s on - the
                   host starts the shoot.
                 </p>
               )}
@@ -650,14 +650,14 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
 
           {phase === "capturing" && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/60">
-              Everyone smile — shooting together! ✨
+              Everyone smile - shooting together! 
             </div>
           )}
 
           {phase === "styling" && (
             <>
               <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white/60">
-                Make it yours — everyone can style &amp; save their own version.
+                Make it yours - everyone can style &amp; save their own version.
               </div>
               <Section title="Filter">
                 <ChipRow>

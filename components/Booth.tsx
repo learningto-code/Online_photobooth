@@ -257,7 +257,7 @@ export default function Booth() {
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:py-8">
       <header className="mb-5 flex items-center justify-between">
         <Link href="/" className="text-sm text-white/50 transition hover:text-white/80">
-          ← Home
+           Home
         </Link>
         <h1 className="text-lg font-semibold tracking-tight">The Booth</h1>
         <div className="w-12" />
@@ -265,13 +265,13 @@ export default function Booth() {
 
       {inApp && (
         <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
-          You&apos;re in an in-app browser that may block the camera. Tap the ••• menu and
+          You&apos;re in an in-app browser that may block the camera. Tap the  menu and
           choose <span className="font-semibold">Open in Safari / Chrome</span>.
         </div>
       )}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        {/* LEFT — stage / preview */}
+        {/* LEFT - stage / preview */}
         <div className="min-w-0">
           {liveView && (
             <CameraStage
@@ -294,7 +294,7 @@ export default function Booth() {
                   ) : (
                     <>
                       <p className="max-w-xs text-sm text-white/70">
-                        We need your camera to take photos. Nothing is uploaded — everything
+                        We need your camera to take photos. Nothing is uploaded - everything
                         stays on your device.
                       </p>
                       <button
@@ -302,7 +302,7 @@ export default function Booth() {
                         disabled={status === "requesting"}
                         className="btn-primary"
                       >
-                        {status === "requesting" ? "Starting…" : "Enable camera"}
+                        {status === "requesting" ? "Starting" : "Enable camera"}
                       </button>
                     </>
                   )}
@@ -320,7 +320,7 @@ export default function Booth() {
           {phase === "review" && (
             <div className="flex flex-col items-center gap-4">
               <p className="text-sm text-white/60">
-                Pick your favourite {layout.shots} — tap in the order you want them.
+                Pick your favourite {layout.shots} - tap in the order you want them.
               </p>
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
                 {captured.map((f) => {
@@ -362,7 +362,7 @@ export default function Booth() {
           )}
         </div>
 
-        {/* RIGHT — controls */}
+        {/* RIGHT - controls */}
         <aside className="flex flex-col gap-5">
           {phase === "ready" && (
             <>
@@ -396,14 +396,14 @@ export default function Booth() {
                 disabled={status !== "ready"}
                 className="btn-primary w-full py-3 text-base"
               >
-                Start · {captureCount} shots
+                Start  {captureCount} shots
               </button>
             </>
           )}
 
           {phase === "capturing" && (
             <div className="rounded-2xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/60">
-              Strike a pose! Capturing {captureCount} shots — you&apos;ll pick your favourites
+              Strike a pose! Capturing {captureCount} shots - you&apos;ll pick your favourites
               next.
             </div>
           )}
@@ -469,7 +469,7 @@ export default function Booth() {
                   className="btn-primary w-full py-3"
                 >
                   {busy
-                    ? "Creating…"
+                    ? "Creating"
                     : selected.length === layout.shots
                       ? "Create photo strip"
                       : `Select ${layout.shots - selected.length} more`}

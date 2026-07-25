@@ -65,7 +65,7 @@ export default function RoomClient({ code }: { code: string }) {
     );
   }
 
-  if (state === "loading") return <Centered>Joining room {code}…</Centered>;
+  if (state === "loading") return <Centered>Joining room {code}</Centered>;
 
   if (state === "error" || !room) {
     return (
