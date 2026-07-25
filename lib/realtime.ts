@@ -11,8 +11,12 @@ export interface PresenceMeta {
 
 /** Ephemeral broadcast events (never carry image bytes — paths only). */
 export type RoomEvent =
-  // Lobby config the host pushes so guests reflect the chosen format.
-  | { type: "config"; layoutId: string; caption: string }
+  // Lobby membership + ready state (broadcast is reliable; presence updates are not).
+  | { type: "meta"; userId: string; name: string; ready: boolean; isHost: boolean }
+  // A newly-joined client asks everyone to re-announce their meta.
+  | { type: "sync_request"; from: string }
+  // Host pushes the chosen format so guests' lobby preview matches.
+  | { type: "config"; layoutId: string }
   | {
       type: "session_start";
       sessionId: string;
@@ -20,7 +24,7 @@ export type RoomEvent =
       order: string[]; // participant user ids, frozen at start
       shots: number;
       frameCount: number;
-      layoutId: string; // filter/frame/caption are chosen AFTER capture (host styling)
+      layoutId: string; // filter/frame/caption are chosen AFTER capture, per person
     }
   | {
       type: "frame_uploaded";
@@ -29,7 +33,6 @@ export type RoomEvent =
       frameIndex: number;
       path: string;
     }
-  | { type: "strip_ready"; sessionId: string; path: string }
   | { type: "session_cancel"; sessionId: string };
 
 export const EVENT = "room_event";
