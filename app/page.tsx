@@ -26,7 +26,7 @@ export default function Home() {
           Share a room link; a shared 3-2-1 fires everyone&apos;s camera at the same moment.
         </Feature>
         <Feature emoji="🎞️" title="Classic strips">
-          The real 4-cut layout — everyone side-by-side, two tear-apart strips per sheet.
+          The real 4-cut layout — four photos in one strip, everyone side-by-side.
         </Feature>
         <Feature emoji="✨" title="Filters & frames">
           Warm film, B&amp;W, soft glow, and colour frames to match the mood.

@@ -17,7 +17,7 @@ import {
 import { DEFAULT_FILTER_ID, FILTERS, getFilter } from "@/lib/filters";
 import { DEFAULT_FRAME_ID, FRAMES, getFrame } from "@/lib/frames";
 import { beep, shutter, unlockAudio } from "@/lib/sound";
-import { cn, formatDate, id, sleep } from "@/lib/utils";
+import { cn, fileToImage, formatDate, id, sleep } from "@/lib/utils";
 import CameraStage from "./CameraStage";
 import StripPreview from "./StripPreview";
 
@@ -48,6 +48,8 @@ export default function Booth() {
   const [result, setResult] = useState<ComposeResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [inApp] = useState(() => isInAppBrowser());
+  const [bgImage, setBgImage] = useState<ImageBitmap | null>(null);
+  const [bgUrl, setBgUrl] = useState<string | null>(null);
 
   const dateStr = useMemo(() => formatDate(), []);
   const layout = getLayout(layoutId);
@@ -59,12 +61,38 @@ export default function Booth() {
   // Refs for unmount cleanup (avoid stale closures).
   const capturedRef = useRef<Frame[]>([]);
   const resultRef = useRef<ComposeResult | null>(null);
+  const bgUrlRef = useRef<string | null>(null);
   useEffect(() => {
     capturedRef.current = captured;
   }, [captured]);
   useEffect(() => {
     resultRef.current = result;
   }, [result]);
+  useEffect(() => {
+    bgUrlRef.current = bgUrl;
+  }, [bgUrl]);
+
+  const onBgUpload = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const { bitmap, url } = await fileToImage(file);
+      setBgUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return url;
+      });
+      setBgImage(bitmap);
+    } catch {
+      /* ignore unreadable images */
+    }
+  }, []);
+
+  const clearBg = useCallback(() => {
+    setBgUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setBgImage(null);
+  }, []);
 
   // Re-attach the stream whenever we return to the live view.
   useEffect(() => {
@@ -78,6 +106,7 @@ export default function Booth() {
         releaseCanvas(f.canvas);
       });
       if (resultRef.current) URL.revokeObjectURL(resultRef.current.url);
+      if (bgUrlRef.current) URL.revokeObjectURL(bgUrlRef.current);
       stop();
     },
     [stop],
@@ -167,6 +196,7 @@ export default function Booth() {
         filterCss: filter.css,
         caption: caption.trim() || "PHOTOBOOTH",
         dateStr,
+        bgImage,
       });
       setResult((r) => {
         if (r) URL.revokeObjectURL(r.url);
@@ -176,7 +206,7 @@ export default function Booth() {
     } finally {
       setBusy(false);
     }
-  }, [selected, layout, captured, frame, filter.css, caption, dateStr]);
+  }, [selected, layout, captured, frame, filter.css, caption, dateStr, bgImage]);
 
   const backToBooth = useCallback(() => {
     setResult((r) => {
@@ -386,6 +416,7 @@ export default function Booth() {
                   style={frame}
                   frameUrls={selectedUrls}
                   filterCss={filter.css}
+                  bgUrl={bgUrl}
                   caption={caption.trim() || "PHOTOBOOTH"}
                   dateStr={dateStr}
                   widthPx={layout.cols > 1 ? 220 : 150}
@@ -408,6 +439,28 @@ export default function Booth() {
                 caption={caption}
                 setCaption={setCaption}
               />
+
+              <Section title="Background photo">
+                <div className="flex items-center gap-2">
+                  <label className="btn-secondary cursor-pointer px-3 py-2 text-sm">
+                    {bgUrl ? "Change" : "Upload"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => void onBgUpload(e.target.files?.[0])}
+                    />
+                  </label>
+                  {bgUrl && (
+                    <button onClick={clearBg} className="btn-ghost">
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-white/40">
+                  Uses your image as the frame background (behind the photos).
+                </p>
+              </Section>
 
               <div className="flex flex-col gap-2">
                 <button
