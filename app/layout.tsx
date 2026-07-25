@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Booth Together — Online Photobooth",
+  title: "Booth Together - Online Photobooth",
   description:
-    "Take photobooth-style photos together, even when you're apart. Filters, frames, and classic photo strips — right in your browser.",
+    "Take photobooth-style photos together, even when you're apart. Filters, frames, and classic photo strips - right in your browser.",
 };
 
 export default function RootLayout({

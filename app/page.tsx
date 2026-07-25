@@ -12,7 +12,7 @@ export default function Home() {
       </h1>
 
       <p className="mt-5 max-w-xl text-balance text-lg text-white/70">
-        A photobooth for you and your people — even when you&apos;re apart. Make a room, share
+        A photobooth for you and your people - even when you&apos;re apart. Make a room, share
         the link, and a synced countdown snaps everyone at once into one photo strip. No app,
         no login.
       </p>
@@ -26,7 +26,7 @@ export default function Home() {
           Share a room link; a shared 3-2-1 fires everyone&apos;s camera at the same moment.
         </Feature>
         <Feature emoji="🎞️" title="Classic strips">
-          The real 4-cut layout — four photos in one strip, everyone side-by-side.
+          The real 4-cut layout - four photos in one strip, everyone side-by-side.
         </Feature>
         <Feature emoji="✨" title="Filters & frames">
           Warm film, B&amp;W, soft glow, and colour frames to match the mood.
