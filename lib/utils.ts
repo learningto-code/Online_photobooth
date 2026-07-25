@@ -19,3 +19,10 @@ export function formatDate(d: Date = new Date()): string {
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
+
+/** Decode an uploaded image file into a drawable bitmap + an object URL. */
+export async function fileToImage(file: File): Promise<{ bitmap: ImageBitmap; url: string }> {
+  const bitmap = await createImageBitmap(file);
+  const url = URL.createObjectURL(file);
+  return { bitmap, url };
+}

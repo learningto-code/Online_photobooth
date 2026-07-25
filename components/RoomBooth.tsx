@@ -16,32 +16,23 @@ import {
 } from "@/lib/realtime";
 import { useCamera } from "@/lib/useCamera";
 import { captureFrame } from "@/lib/capture";
-import {
-  composeSheetMulti,
-  Drawable,
-  subSlotAspect,
-} from "@/lib/composite";
-import {
-  captureSize,
-  computeLayout,
-  getLayout,
-  LAYOUTS,
-  LayoutId,
-} from "@/lib/layouts";
+import { composeSheetMulti, Drawable, subSlotAspect } from "@/lib/composite";
+import { captureSize, computeLayout, getLayout, LAYOUTS, LayoutId } from "@/lib/layouts";
 import { DEFAULT_FILTER_ID, FILTERS, getFilter } from "@/lib/filters";
 import { DEFAULT_FRAME_ID, FRAMES, getFrame } from "@/lib/frames";
 import { beep, shutter, unlockAudio } from "@/lib/sound";
-import { cn, formatDate, id, sleep } from "@/lib/utils";
+import { cn, fileToImage, formatDate, id, sleep } from "@/lib/utils";
 import CameraStage from "./CameraStage";
 import { Chip, ChipRow, Section } from "./ui";
 
 const COUNTDOWN_SECONDS = 3;
-const LEAD_MS = 5000; // from now to the first shot
+const LEAD_MS = 5000; // now → first shot
 const SHOT_PAUSE_MS = 700;
 const FLASH_MS = 170;
-const CAPTURE_WINDOW_MS = 40000; // host safety timeout to composite whatever arrived
+const COLLECT_TIMEOUT_MS = 45000; // backstop: compose with whatever arrived
 
-type Phase = "lobby" | "capturing" | "processing" | "result";
+type Phase = "lobby" | "capturing" | "processing" | "styling" | "result";
+type SessionStart = Extract<RoomEvent, { type: "session_start" }>;
 
 interface Props {
   room: Room;
@@ -58,29 +49,39 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
   const [presence, setPresence] = useState<Record<string, PresenceMeta>>({});
   const [subscribed, setSubscribed] = useState(false);
 
-  // Session config (host picks; broadcast to all).
+  // Format is synced pre-capture; filter/frame/caption/bg are chosen AFTER capture (host styling).
   const [layoutId, setLayoutId] = useState<LayoutId>(room.layout as LayoutId);
   const [filterId, setFilterId] = useState(DEFAULT_FILTER_ID);
   const [frameId, setFrameId] = useState(DEFAULT_FRAME_ID);
   const [caption, setCaption] = useState(room.name?.trim() || "PHOTOBOOTH");
+  const [bgImage, setBgImage] = useState<ImageBitmap | null>(null);
+  const [bgUrl, setBgUrl] = useState<string | null>(null);
 
   const [phase, setPhase] = useState<Phase>("lobby");
-  const [session, setSession] = useState<Extract<RoomEvent, { type: "session_start" }> | null>(
-    null,
-  );
+  const [session, setSession] = useState<SessionStart | null>(null);
   const [count, setCount] = useState<string | null>(null);
   const [flash, setFlash] = useState(false);
   const [shotNo, setShotNo] = useState(0);
   const [result, setResult] = useState<{ url: string | null } | null>(null);
+  const [styleUrl, setStyleUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const offsetRef = useRef(0);
   const handlerRef = useRef<(e: RoomEvent) => void>(() => {});
-  const receivedRef = useRef<Map<string, RoomEvent & { type: "frame_uploaded" }>>(new Map());
+  const sessionRef = useRef<SessionStart | null>(null);
+  const receivedRef = useRef<Map<string, string>>(new Map()); // `${uid}:${i}` -> storage path
+  const hostOwnFramesRef = useRef<HTMLCanvasElement[]>([]);
+  const hostDoneRef = useRef<string | null>(null); // sessionId whose host-capture finished
+  const stylingSlotsRef = useRef<Array<Array<Drawable | null>>>([]);
+  const collectedRef = useRef<string | null>(null);
   const builtRef = useRef<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sessionRef = useRef<Extract<RoomEvent, { type: "session_start" }> | null>(null);
+  const stripBlobRef = useRef<Blob | null>(null);
+  const styleUrlRef = useRef<string | null>(null);
+  const bgUrlRef = useRef<string | null>(null);
+  const resultUrlRef = useRef<string | null>(null);
 
   const cameraReady = camStatus === "ready";
   const dateStr = useMemo(() => formatDate(), []);
@@ -96,39 +97,40 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     phase === "capturing" && session
       ? session.order.length
       : Math.max(1, readyIds.length || participants.length || 1);
-
   const previewAspect = useMemo(() => {
     const slot0 = computeLayout(layout).slots[0];
     return subSlotAspect(slot0.w, slot0.h, previewParticipants);
   }, [layout, previewParticipants]);
 
-  const activeFilterCss = getFilter(session?.filterId ?? filterId).css;
+  useEffect(() => {
+    styleUrlRef.current = styleUrl;
+  }, [styleUrl]);
+  useEffect(() => {
+    bgUrlRef.current = bgUrl;
+  }, [bgUrl]);
+  useEffect(() => {
+    resultUrlRef.current = result?.url ?? null;
+  }, [result]);
 
   // ---- Realtime channel setup -------------------------------------------
   useEffect(() => {
     const ch = roomChannel(room.id, userId);
     channelRef.current = ch;
 
-    ch.on("presence", { event: "sync" }, () => {
+    const syncPresence = () => {
       const state = ch.presenceState<PresenceMeta>();
       const map: Record<string, PresenceMeta> = {};
       for (const key of Object.keys(state)) {
-        const metas = state[key];
-        if (metas && metas[0]) {
-          map[key] = {
-            userId: metas[0].userId,
-            name: metas[0].name,
-            ready: metas[0].ready,
-            isHost: metas[0].isHost,
-          };
-        }
+        const m = state[key]?.[0];
+        if (m) map[key] = { userId: m.userId, name: m.name, ready: m.ready, isHost: m.isHost };
       }
       setPresence(map);
-    });
+    };
 
-    ch.on("broadcast", { event: EVENT }, ({ payload }) =>
-      handlerRef.current(payload as RoomEvent),
-    );
+    ch.on("presence", { event: "sync" }, syncPresence);
+    ch.on("presence", { event: "join" }, syncPresence);
+    ch.on("presence", { event: "leave" }, syncPresence);
+    ch.on("broadcast", { event: EVENT }, ({ payload }) => handlerRef.current(payload as RoomEvent));
 
     ch.subscribe(async (statusStr) => {
       if (statusStr === "SUBSCRIBED") {
@@ -142,36 +144,122 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
       void ch.unsubscribe();
       getSupabase().removeChannel(ch);
+      channelRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.id, userId]);
 
-  // Re-broadcast presence when our meta changes.
+  // Re-broadcast our presence when name/ready changes.
   useEffect(() => {
     if (subscribed && channelRef.current) {
       void channelRef.current.track({ userId, name: displayName, ready, isHost });
     }
   }, [subscribed, displayName, ready, isHost, userId]);
 
+  // Host pushes format to guests (on change + whenever someone joins).
+  useEffect(() => {
+    if (isHost && subscribed && channelRef.current) {
+      sendEvent(channelRef.current, { type: "config", layoutId, caption });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHost, subscribed, layoutId, participants.length]);
+
+  // ---- Background upload (host styling) ---------------------------------
+  const onBgUpload = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const { bitmap, url } = await fileToImage(file);
+      setBgUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return url;
+      });
+      setBgImage(bitmap);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const clearBg = useCallback(() => {
+    setBgUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+    setBgImage(null);
+  }, []);
+
+  // ---- Host: assemble frames then move to the styling step --------------
+  const loadFrame = useCallback(async (path: string): Promise<Drawable | null> => {
+    try {
+      const { data } = await getSupabase().storage.from("captures").download(path);
+      if (!data) return null;
+      return await createImageBitmap(data);
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const collectAndStyle = useCallback(
+    async (ses: SessionStart) => {
+      if (!isHost) return;
+      if (collectedRef.current === ses.sessionId) return;
+      collectedRef.current = ses.sessionId;
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+
+      const slots: Array<Array<Drawable | null>> = [];
+      for (let i = 0; i < ses.shots; i++) {
+        const row: Array<Drawable | null> = [];
+        for (const uid of ses.order) {
+          if (uid === userId && hostOwnFramesRef.current[i]) {
+            row.push(hostOwnFramesRef.current[i]);
+          } else {
+            const path = receivedRef.current.get(`${uid}:${i}`);
+            row.push(path ? await loadFrame(path) : null);
+          }
+        }
+        slots.push(row);
+      }
+      stylingSlotsRef.current = slots;
+      setPhase("styling");
+    },
+    [isHost, userId, loadFrame],
+  );
+
+  const tryCollect = useCallback(
+    (ses: SessionStart | null) => {
+      if (!ses || !isHost) return;
+      if (collectedRef.current === ses.sessionId) return;
+      // Wait for the host's own capture (if the host is a participant).
+      if (ses.order.includes(userId) && hostDoneRef.current !== ses.sessionId) return;
+      const needed = ses.order.filter((u) => u !== userId);
+      const complete = needed.every((u) => {
+        for (let i = 0; i < ses.shots; i++) if (!receivedRef.current.has(`${u}:${i}`)) return false;
+        return true;
+      });
+      if (complete) void collectAndStyle(ses);
+    },
+    [isHost, userId, collectAndStyle],
+  );
+
   // ---- Capture sequence (runs on every device) --------------------------
   const runCapture = useCallback(
-    async (ses: Extract<RoomEvent, { type: "session_start" }>) => {
+    async (ses: SessionStart) => {
       const video = videoRef.current;
-      const partCount = ses.order.length;
       const myTurn = ses.order.includes(userId);
       if (!video || camStatus !== "ready" || !myTurn) {
-        // Not participating (no camera / not ready): just wait for the strip.
         setPhase("processing");
+        if (isHost) {
+          hostDoneRef.current = ses.sessionId; // host not shooting → don't block collection
+          tryCollect(ses);
+        }
         return;
       }
       unlockAudio();
 
-      const lay = getLayout(ses.layoutId);
-      const slot0 = computeLayout(lay).slots[0];
-      const aspect = subSlotAspect(slot0.w, slot0.h, partCount);
-      const size = captureSize(aspect);
+      const slot0 = computeLayout(getLayout(ses.layoutId)).slots[0];
+      const size = captureSize(subSlotAspect(slot0.w, slot0.h, ses.order.length));
 
-      // Anchor the first countdown to the shared shoot instant.
       const startLocal = ses.shootAt - COUNTDOWN_SECONDS * 1000 - offsetRef.current;
       const wait = startLocal - Date.now();
       if (wait > 0) await sleep(wait);
@@ -192,11 +280,15 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
         setFlash(false);
         await sleep(SHOT_PAUSE_MS);
       }
-
       setShotNo(0);
       setPhase("processing");
 
-      // Upload my frames, then announce each path.
+      if (isHost) {
+        hostOwnFramesRef.current = frames;
+        hostDoneRef.current = ses.sessionId;
+      }
+
+      // Upload frames + announce paths (guests need these; host also persists its own).
       const ch = channelRef.current;
       await Promise.all(
         frames.map(async (canvas, i) => {
@@ -209,78 +301,21 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
             .storage.from("captures")
             .upload(path, blob, { contentType: "image/jpeg", upsert: true });
           if (error) return;
-          if (ch) sendEvent(ch, { type: "frame_uploaded", sessionId: ses.sessionId, userId, frameIndex: i, path });
+          if (!isHost && ch) {
+            sendEvent(ch, { type: "frame_uploaded", sessionId: ses.sessionId, userId, frameIndex: i, path });
+          }
         }),
       );
+
+      if (isHost) tryCollect(ses);
     },
-    [videoRef, camStatus, userId, room.id],
-  );
-
-  // ---- Host: build the final strip once all frames are in ---------------
-  const buildStripOnce = useCallback(
-    async (ses: Extract<RoomEvent, { type: "session_start" }>) => {
-      if (!isHost) return;
-      if (builtRef.current === ses.sessionId) return;
-      builtRef.current = ses.sessionId;
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-
-      const sb = getSupabase();
-      const lay = getLayout(ses.layoutId);
-
-      const cache = new Map<string, Drawable | null>();
-      const load = async (path: string): Promise<Drawable | null> => {
-        if (cache.has(path)) return cache.get(path) ?? null;
-        const { data } = await sb.storage.from("captures").download(path);
-        let bmp: Drawable | null = null;
-        if (data) {
-          try {
-            bmp = await createImageBitmap(data);
-          } catch {
-            bmp = null;
-          }
-        }
-        cache.set(path, bmp);
-        return bmp;
-      };
-
-      const slots: Array<Array<Drawable | null>> = [];
-      for (let i = 0; i < ses.shots; i++) {
-        const row: Array<Drawable | null> = [];
-        for (const uid of ses.order) {
-          const rec = receivedRef.current.get(`${uid}:${i}`);
-          row.push(rec ? await load(rec.path) : null);
-        }
-        slots.push(row);
-      }
-
-      const res = await composeSheetMulti({
-        slots,
-        layout: lay,
-        style: getFrame(ses.frameId),
-        filterCss: getFilter(ses.filterId).css,
-        caption: ses.caption || "PHOTOBOOTH",
-        dateStr,
-      });
-
-      const stripPath = `${room.id}/${ses.sessionId}.png`;
-      await sb.storage.from("strips").upload(stripPath, res.blob, {
-        contentType: "image/png",
-        upsert: true,
-      });
-      await sb
-        .from("strips")
-        .insert({ room_id: room.id, session_id: ses.sessionId, storage_path: stripPath, created_by: userId });
-
-      URL.revokeObjectURL(res.url);
-      const ch = channelRef.current;
-      if (ch) sendEvent(ch, { type: "strip_ready", sessionId: ses.sessionId, path: stripPath });
-    },
-    [isHost, room.id, userId, dateStr],
+    [videoRef, camStatus, userId, room.id, isHost, tryCollect],
   );
 
   const onStripReady = useCallback(async (path: string) => {
-    const sb = getSupabase();
-    const { data } = await sb.storage.from("strips").createSignedUrl(path, 60 * 60 * 24 * 7);
+    const { data } = await getSupabase()
+      .storage.from("strips")
+      .createSignedUrl(path, 60 * 60 * 24 * 7);
     setResult({ url: data?.signedUrl ?? null });
     setPhase("result");
   }, []);
@@ -289,28 +324,37 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
   const handleEvent = useCallback(
     (e: RoomEvent) => {
       switch (e.type) {
+        case "config":
+          if (!isHost) {
+            setLayoutId(e.layoutId as LayoutId);
+          }
+          break;
         case "session_start": {
           receivedRef.current = new Map();
+          hostOwnFramesRef.current = [];
+          hostDoneRef.current = null;
+          stylingSlotsRef.current = [];
+          collectedRef.current = null;
           builtRef.current = null;
+          stripBlobRef.current = null;
+          if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current);
+            timeoutRef.current = null;
+          }
           sessionRef.current = e;
           setResult(null);
           setSession(e);
           setPhase("capturing");
           void runCapture(e);
           if (isHost) {
-            if (timeoutRef.current) clearTimeout(timeoutRef.current);
-            timeoutRef.current = setTimeout(() => void buildStripOnce(e), CAPTURE_WINDOW_MS);
+            timeoutRef.current = setTimeout(() => void collectAndStyle(e), COLLECT_TIMEOUT_MS);
           }
           break;
         }
         case "frame_uploaded": {
-          if (!isHost) return;
-          receivedRef.current.set(`${e.userId}:${e.frameIndex}`, e);
-          const ses = sessionRef.current;
-          if (ses) {
-            const expected = ses.order.length * ses.shots;
-            if (receivedRef.current.size >= expected) void buildStripOnce(ses);
-          }
+          if (!isHost || e.userId === userId) return;
+          receivedRef.current.set(`${e.userId}:${e.frameIndex}`, e.path);
+          tryCollect(sessionRef.current);
           break;
         }
         case "strip_ready":
@@ -322,17 +366,78 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
           break;
       }
     },
-    [isHost, runCapture, buildStripOnce, onStripReady],
+    [isHost, userId, runCapture, collectAndStyle, tryCollect, onStripReady],
   );
 
-  // Keep the latest session available to the (host) frame_uploaded handler.
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
-
   useEffect(() => {
     handlerRef.current = handleEvent;
   }, [handleEvent]);
+
+  // ---- Host styling: live-compose a preview on every style change -------
+  useEffect(() => {
+    if (phase !== "styling") return;
+    let cancelled = false;
+    void (async () => {
+      const res = await composeSheetMulti({
+        slots: stylingSlotsRef.current,
+        layout: getLayout(layoutId),
+        style: getFrame(frameId),
+        filterCss: getFilter(filterId).css,
+        caption: caption.trim() || "PHOTOBOOTH",
+        dateStr,
+        bgImage,
+      });
+      if (cancelled) {
+        URL.revokeObjectURL(res.url);
+        return;
+      }
+      stripBlobRef.current = res.blob;
+      setStyleUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return res.url;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, layoutId, filterId, frameId, caption, bgImage, dateStr]);
+
+  const finalizeStrip = useCallback(async () => {
+    const ses = sessionRef.current;
+    const ch = channelRef.current;
+    if (!ses || !ch || builtRef.current === ses.sessionId) return;
+    setBusy(true);
+    try {
+      let blob = stripBlobRef.current;
+      if (!blob) {
+        const res = await composeSheetMulti({
+          slots: stylingSlotsRef.current,
+          layout: getLayout(layoutId),
+          style: getFrame(frameId),
+          filterCss: getFilter(filterId).css,
+          caption: caption.trim() || "PHOTOBOOTH",
+          dateStr,
+          bgImage,
+        });
+        blob = res.blob;
+        URL.revokeObjectURL(res.url);
+      }
+      const path = `${room.id}/${ses.sessionId}.png`;
+      await getSupabase()
+        .storage.from("strips")
+        .upload(path, blob, { contentType: "image/png", upsert: true });
+      await getSupabase()
+        .from("strips")
+        .insert({ room_id: room.id, session_id: ses.sessionId, storage_path: path, created_by: userId });
+      builtRef.current = ses.sessionId;
+      sendEvent(ch, { type: "strip_ready", sessionId: ses.sessionId, path });
+    } finally {
+      setBusy(false);
+    }
+  }, [layoutId, frameId, filterId, caption, bgImage, dateStr, room.id, userId]);
 
   // ---- Host: start a synchronized session -------------------------------
   const startSession = useCallback(() => {
@@ -344,47 +449,52 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       return;
     }
     const lay = getLayout(layoutId);
-    const sessionId = id();
-    const shootAt = Date.now() + offsetRef.current + LEAD_MS;
-    const evt: Extract<RoomEvent, { type: "session_start" }> = {
+    const evt: SessionStart = {
       type: "session_start",
-      sessionId,
-      shootAt,
+      sessionId: id(),
+      shootAt: Date.now() + offsetRef.current + LEAD_MS,
       order,
       shots: lay.shots,
       frameCount: lay.shots,
       layoutId,
-      filterId,
-      frameId,
-      caption: caption.trim() || "PHOTOBOOTH",
     };
     sendEvent(ch, evt);
-    // Best-effort durability (not on the critical path).
     void getSupabase()
       .from("sessions")
       .insert({
-        id: sessionId,
+        id: evt.sessionId,
         room_id: room.id,
         started_by: userId,
-        shoot_at: shootAt,
+        shoot_at: evt.shootAt,
         layout: layoutId,
-        filter_id: filterId,
-        frame_id: frameId,
-        caption: caption.trim() || "PHOTOBOOTH",
         shots: lay.shots,
         frame_count: lay.shots,
         participant_order: order,
         status: "shooting",
       });
-  }, [readyIds, layoutId, filterId, frameId, caption, room.id, userId]);
+  }, [readyIds, layoutId, room.id, userId]);
 
   const backToLobby = useCallback(() => {
     setResult(null);
+    setStyleUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     setSession(null);
     setPhase("lobby");
   }, []);
 
   const inviteUrl = typeof window !== "undefined" ? `${window.location.origin}/room/${room.code}` : "";
+
+  // ---- Cleanup ----------------------------------------------------------
+  useEffect(
+    () => () => {
+      if (styleUrlRef.current) URL.revokeObjectURL(styleUrlRef.current);
+      if (bgUrlRef.current) URL.revokeObjectURL(bgUrlRef.current);
+      if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
+    },
+    [],
+  );
 
   const download = useCallback(async () => {
     if (!result?.url) return;
@@ -428,30 +538,43 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        {/* LEFT — self view / result */}
-        <div className="min-w-0">
+        {/* LEFT — self view / preview / result */}
+        <div className="flex min-w-0 flex-col gap-4">
           {phase === "result" && result ? (
-            <div className="flex flex-col items-center">
-              {result.url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={result.url}
-                  alt="Your photo strip"
-                  className="max-h-[70vh] w-auto rounded-lg shadow-2xl shadow-black/50 ring-1 ring-white/10"
-                />
-              ) : (
-                <p className="text-white/60">Couldn&apos;t load the strip.</p>
-              )}
-            </div>
-          ) : phase === "processing" ? (
-            <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white/60">
-              Developing your photos…
+            result.url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={result.url}
+                alt="Your photo strip"
+                className="mx-auto max-h-[70vh] w-auto rounded-lg shadow-2xl shadow-black/50 ring-1 ring-white/10"
+              />
+            ) : (
+              <p className="text-center text-white/60">Couldn&apos;t load the strip.</p>
+            )
+          ) : phase === "styling" && isHost ? (
+            styleUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={styleUrl}
+                alt="Style preview"
+                className="mx-auto max-h-[70vh] w-auto rounded-lg shadow-2xl shadow-black/50 ring-1 ring-white/10"
+              />
+            ) : (
+              <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white/60">
+                Preparing your photos…
+              </div>
+            )
+          ) : phase === "processing" || phase === "styling" ? (
+            <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-6 text-center text-white/60">
+              {phase === "styling"
+                ? "The host is choosing the style — hang tight ✨"
+                : "Got your shots! Developing the photo…"}
             </div>
           ) : (
             <CameraStage
               videoRef={videoRef}
               aspect={previewAspect}
-              filterCss={activeFilterCss}
+              filterCss="none"
               overlay={count}
               flash={flash}
               dimmed={phase === "capturing" && count == null}
@@ -491,9 +614,28 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
               )}
             </CameraStage>
           )}
+
+          {/* Invite (under the preview) */}
+          {phase === "lobby" && inviteUrl && (
+            <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+              <div className="rounded bg-white p-1.5">
+                <QRCodeSVG value={inviteUrl} size={72} />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs uppercase tracking-wider text-white/40">Invite a friend</p>
+                <p className="truncate text-xs text-white/60">{inviteUrl}</p>
+                <button
+                  onClick={() => void navigator.clipboard?.writeText(inviteUrl)}
+                  className="btn-ghost mt-1 px-0"
+                >
+                  Copy link
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* RIGHT — lobby / result controls */}
+        {/* RIGHT — controls */}
         <aside className="flex flex-col gap-5">
           {phase === "lobby" && (
             <>
@@ -552,68 +694,24 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                       ))}
                     </div>
                   </Section>
-                  <Section title="Filter">
-                    <ChipRow>
-                      {FILTERS.map((f) => (
-                        <Chip key={f.id} active={filterId === f.id} onClick={() => setFilterId(f.id)}>
-                          {f.name}
-                        </Chip>
-                      ))}
-                    </ChipRow>
-                  </Section>
-                  <Section title="Frame">
-                    <div className="flex flex-wrap gap-2">
-                      {FRAMES.map((f) => (
-                        <button
-                          key={f.id}
-                          onClick={() => setFrameId(f.id)}
-                          title={f.name}
-                          className={cn(
-                            "h-9 w-9 rounded-full border-2 transition",
-                            frameId === f.id ? "border-pink-400 scale-110" : "border-white/20",
-                          )}
-                          style={{ background: f.swatch ?? f.sheetBg }}
-                        />
-                      ))}
-                    </div>
-                  </Section>
-                  <Section title="Caption">
-                    <input
-                      value={caption}
-                      onChange={(e) => setCaption(e.target.value.slice(0, 24))}
-                      placeholder="PHOTOBOOTH"
-                      className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none placeholder:text-white/30 focus:border-pink-400"
-                    />
-                  </Section>
+                  <p className="text-xs text-white/45">
+                    Filters, frames &amp; a custom background come after the shots.
+                  </p>
                   {notice && <p className="text-xs text-amber-300">{notice}</p>}
-                  <button onClick={startSession} disabled={readyIds.length === 0} className="btn-primary w-full py-3">
+                  <button
+                    onClick={startSession}
+                    disabled={readyIds.length === 0}
+                    className="btn-primary w-full py-3"
+                  >
                     Start shoot · {readyIds.length} ready
                   </button>
                 </>
               ) : (
                 <p className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
-                  Waiting for the host to start the shoot. Tap <b>Ready</b> when your camera&apos;s on.
+                  Format: <b>{layout.name}</b>. Tap <b>Ready</b> when your camera&apos;s on — the
+                  host starts the shoot.
                 </p>
               )}
-
-              <Section title="Invite">
-                <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
-                  {inviteUrl && (
-                    <div className="rounded bg-white p-1.5">
-                      <QRCodeSVG value={inviteUrl} size={72} />
-                    </div>
-                  )}
-                  <div className="min-w-0">
-                    <p className="truncate text-xs text-white/50">{inviteUrl}</p>
-                    <button
-                      onClick={() => void navigator.clipboard?.writeText(inviteUrl)}
-                      className="btn-ghost mt-1 px-0"
-                    >
-                      Copy link
-                    </button>
-                  </div>
-                </div>
-              </Section>
             </>
           )}
 
@@ -621,6 +719,65 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
             <div className="rounded-2xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/60">
               Everyone smile — shooting together! ✨
             </div>
+          )}
+
+          {phase === "styling" && isHost && (
+            <>
+              <Section title="Filter">
+                <ChipRow>
+                  {FILTERS.map((f) => (
+                    <Chip key={f.id} active={filterId === f.id} onClick={() => setFilterId(f.id)}>
+                      {f.name}
+                    </Chip>
+                  ))}
+                </ChipRow>
+              </Section>
+              <Section title="Frame">
+                <div className="flex flex-wrap gap-2">
+                  {FRAMES.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => setFrameId(f.id)}
+                      title={f.name}
+                      className={cn(
+                        "h-9 w-9 rounded-full border-2 transition",
+                        frameId === f.id ? "border-pink-400 scale-110" : "border-white/20",
+                      )}
+                      style={{ background: f.swatch ?? f.sheetBg }}
+                    />
+                  ))}
+                </div>
+              </Section>
+              <Section title="Background photo">
+                <div className="flex items-center gap-2">
+                  <label className="btn-secondary cursor-pointer px-3 py-2 text-sm">
+                    {bgUrl ? "Change" : "Upload"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => void onBgUpload(e.target.files?.[0])}
+                    />
+                  </label>
+                  {bgUrl && (
+                    <button onClick={clearBg} className="btn-ghost">
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </Section>
+              <Section title="Caption">
+                <input
+                  value={caption}
+                  onChange={(e) => setCaption(e.target.value.slice(0, 24))}
+                  placeholder="PHOTOBOOTH"
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none placeholder:text-white/30 focus:border-pink-400"
+                />
+              </Section>
+              <button onClick={() => void finalizeStrip()} disabled={busy} className="btn-primary w-full py-3">
+                {busy ? "Creating…" : "Finish photo"}
+              </button>
+            </>
           )}
 
           {phase === "result" && (
@@ -643,9 +800,11 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                     <p className="text-xs text-white/50">Scan to save on your phone</p>
                   </div>
                 )}
-                <button onClick={backToLobby} className="btn-ghost">
-                  Back to lobby
-                </button>
+                {isHost && (
+                  <button onClick={backToLobby} className="btn-ghost">
+                    Back to lobby
+                  </button>
+                )}
               </div>
             </>
           )}

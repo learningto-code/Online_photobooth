@@ -19,6 +19,8 @@ export interface ComposeInput {
   filterCss: string;
   caption: string;
   dateStr: string;
+  /** Optional custom background image drawn (cover) behind the photos. */
+  bgImage?: Drawable | null;
 }
 
 export interface ComposeMultiInput {
@@ -29,9 +31,11 @@ export interface ComposeMultiInput {
   filterCss: string;
   caption: string;
   dateStr: string;
+  bgImage?: Drawable | null;
 }
 
-const SUB_GAP = 6;
+// No gap between participants — their photos combine seamlessly in one cut.
+const SUB_GAP = 0;
 
 function roundRectPath(
   ctx: CanvasRenderingContext2D,
@@ -122,7 +126,11 @@ async function finish(canvas: HTMLCanvasElement): Promise<ComposeResult> {
   return result;
 }
 
-function newCanvas(layout: LayoutDef, style: FrameStyle): {
+function newCanvas(
+  layout: LayoutDef,
+  style: FrameStyle,
+  bgImage?: Drawable | null,
+): {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
 } {
@@ -133,13 +141,21 @@ function newCanvas(layout: LayoutDef, style: FrameStyle): {
   if (!ctx) throw new Error("Canvas 2D context unavailable");
   ctx.fillStyle = style.sheetBg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (bgImage) {
+    drawCover(ctx, bgImage, bgImage.width, bgImage.height, {
+      x: 0,
+      y: 0,
+      w: canvas.width,
+      h: canvas.height,
+    });
+  }
   return { canvas, ctx };
 }
 
 /** Single-photo-per-slot layout (solo booth). */
 export async function composeSheet(input: ComposeInput): Promise<ComposeResult> {
-  const { frames, layout, style, filterCss, caption, dateStr } = input;
-  const { canvas, ctx } = newCanvas(layout, style);
+  const { frames, layout, style, filterCss, caption, dateStr, bgImage } = input;
+  const { canvas, ctx } = newCanvas(layout, style, bgImage);
   const { slots, footer } = computeLayout(layout);
   const filter = normFilter(filterCss);
 
@@ -160,8 +176,8 @@ export async function composeSheet(input: ComposeInput): Promise<ComposeResult> 
 
 /** Multi-participant layout: each slot is split into columns, one per person. */
 export async function composeSheetMulti(input: ComposeMultiInput): Promise<ComposeResult> {
-  const { slots: people, layout, style, filterCss, caption, dateStr } = input;
-  const { canvas, ctx } = newCanvas(layout, style);
+  const { slots: people, layout, style, filterCss, caption, dateStr, bgImage } = input;
+  const { canvas, ctx } = newCanvas(layout, style, bgImage);
   const { slots, footer } = computeLayout(layout);
   const filter = normFilter(filterCss);
 

@@ -10,6 +10,8 @@ interface StripPreviewProps {
   frameUrls: Array<string | null>;
   /** CSS filter applied to the photos (chosen after capture). */
   filterCss: string;
+  /** Optional custom background image URL (drawn cover behind photos). */
+  bgUrl?: string | null;
   caption: string;
   dateStr: string;
   widthPx: number;
@@ -24,6 +26,7 @@ export default function StripPreview({
   style,
   frameUrls,
   filterCss,
+  bgUrl,
   caption,
   dateStr,
   widthPx,
@@ -35,8 +38,15 @@ export default function StripPreview({
 
   return (
     <div
-      className="relative overflow-hidden rounded-[10px] shadow-2xl shadow-black/40 ring-1 ring-black/10"
-      style={{ width: widthPx, height: heightPx, background: style.sheetBg }}
+      className="relative overflow-hidden rounded-[10px] bg-cover bg-center shadow-2xl shadow-black/40 ring-1 ring-black/10"
+      style={{
+        width: widthPx,
+        height: heightPx,
+        background: style.sheetBg,
+        backgroundImage: bgUrl ? `url(${bgUrl})` : undefined,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }}
     >
       {slots.map((slot, i) => {
         const url = frameUrls[i] ?? null;

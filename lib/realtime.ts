@@ -11,6 +11,8 @@ export interface PresenceMeta {
 
 /** Ephemeral broadcast events (never carry image bytes — paths only). */
 export type RoomEvent =
+  // Lobby config the host pushes so guests reflect the chosen format.
+  | { type: "config"; layoutId: string; caption: string }
   | {
       type: "session_start";
       sessionId: string;
@@ -18,10 +20,7 @@ export type RoomEvent =
       order: string[]; // participant user ids, frozen at start
       shots: number;
       frameCount: number;
-      layoutId: string;
-      filterId: string;
-      frameId: string;
-      caption: string;
+      layoutId: string; // filter/frame/caption are chosen AFTER capture (host styling)
     }
   | {
       type: "frame_uploaded";
