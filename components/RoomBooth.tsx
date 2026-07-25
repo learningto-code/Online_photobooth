@@ -29,9 +29,9 @@ const COUNTDOWN_SECONDS = 3;
 const LEAD_MS = 5000; // now → first shot
 const SHOT_PAUSE_MS = 700;
 const FLASH_MS = 170;
-const COLLECT_TIMEOUT_MS = 45000; // backstop: compose with whatever arrived
+const COLLECT_TIMEOUT_MS = 25000; // backstop: build with whatever arrived
 
-type Phase = "lobby" | "capturing" | "processing" | "styling" | "result";
+type Phase = "lobby" | "capturing" | "processing" | "styling";
 type SessionStart = Extract<RoomEvent, { type: "session_start" }>;
 
 interface Props {
@@ -46,10 +46,10 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
 
   const [displayName, setDisplayName] = useState(name);
   const [ready, setReady] = useState(false);
-  const [presence, setPresence] = useState<Record<string, PresenceMeta>>({});
+  const [peers, setPeers] = useState<Record<string, PresenceMeta>>({});
   const [subscribed, setSubscribed] = useState(false);
 
-  // Format is synced pre-capture; filter/frame/caption/bg are chosen AFTER capture (host styling).
+  // Format is synced pre-capture; filter/frame/caption/bg are chosen AFTER capture (per person).
   const [layoutId, setLayoutId] = useState<LayoutId>(room.layout as LayoutId);
   const [filterId, setFilterId] = useState(DEFAULT_FILTER_ID);
   const [frameId, setFrameId] = useState(DEFAULT_FRAME_ID);
@@ -62,31 +62,27 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
   const [count, setCount] = useState<string | null>(null);
   const [flash, setFlash] = useState(false);
   const [shotNo, setShotNo] = useState(0);
-  const [result, setResult] = useState<{ url: string | null } | null>(null);
   const [styleUrl, setStyleUrl] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const offsetRef = useRef(0);
   const handlerRef = useRef<(e: RoomEvent) => void>(() => {});
   const sessionRef = useRef<SessionStart | null>(null);
-  const receivedRef = useRef<Map<string, string>>(new Map()); // `${uid}:${i}` -> storage path
-  const hostOwnFramesRef = useRef<HTMLCanvasElement[]>([]);
-  const hostDoneRef = useRef<string | null>(null); // sessionId whose host-capture finished
+  const receivedRef = useRef<Map<string, string>>(new Map()); // `${uid}:${i}` -> path (others)
+  const myFramesRef = useRef<HTMLCanvasElement[]>([]);
+  const myDoneRef = useRef<string | null>(null); // sessionId whose local capture finished
   const stylingSlotsRef = useRef<Array<Array<Drawable | null>>>([]);
   const collectedRef = useRef<string | null>(null);
-  const builtRef = useRef<string | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stripBlobRef = useRef<Blob | null>(null);
   const styleUrlRef = useRef<string | null>(null);
   const bgUrlRef = useRef<string | null>(null);
-  const resultUrlRef = useRef<string | null>(null);
 
   const cameraReady = camStatus === "ready";
   const dateStr = useMemo(() => formatDate(), []);
 
-  const participants = useMemo(() => Object.values(presence), [presence]);
+  const participants = useMemo(() => Object.values(peers), [peers]);
   const readyIds = useMemo(
     () => participants.filter((p) => p.ready).map((p) => p.userId).sort(),
     [participants],
@@ -108,35 +104,31 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
   useEffect(() => {
     bgUrlRef.current = bgUrl;
   }, [bgUrl]);
-  useEffect(() => {
-    resultUrlRef.current = result?.url ?? null;
-  }, [result]);
 
   // ---- Realtime channel setup -------------------------------------------
   useEffect(() => {
     const ch = roomChannel(room.id, userId);
     channelRef.current = ch;
 
-    const syncPresence = () => {
-      const state = ch.presenceState<PresenceMeta>();
-      const map: Record<string, PresenceMeta> = {};
-      for (const key of Object.keys(state)) {
-        const m = state[key]?.[0];
-        if (m) map[key] = { userId: m.userId, name: m.name, ready: m.ready, isHost: m.isHost };
-      }
-      setPresence(map);
-    };
+    // Presence is used ONLY for leave-detection (its update events are flaky).
+    ch.on("presence", { event: "leave" }, ({ key }: { key: string }) => {
+      setPeers((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    });
 
-    ch.on("presence", { event: "sync" }, syncPresence);
-    ch.on("presence", { event: "join" }, syncPresence);
-    ch.on("presence", { event: "leave" }, syncPresence);
     ch.on("broadcast", { event: EVENT }, ({ payload }) => handlerRef.current(payload as RoomEvent));
 
     ch.subscribe(async (statusStr) => {
       if (statusStr === "SUBSCRIBED") {
-        await ch.track({ userId, name: displayName, ready: false, isHost });
+        await ch.track({ userId });
         setSubscribed(true);
         offsetRef.current = await getServerOffsetMs();
+        // Ask everyone (incl. me, via self-broadcast) to announce their meta.
+        sendEvent(ch, { type: "sync_request", from: userId });
       }
     });
 
@@ -146,25 +138,24 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       getSupabase().removeChannel(ch);
       channelRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.id, userId]);
 
-  // Re-broadcast our presence when name/ready changes.
+  // Broadcast my meta on join and whenever my name/ready changes. It comes back
+  // to me via self-broadcast, so `peers` (incl. my own row) updates in handleEvent.
   useEffect(() => {
     if (subscribed && channelRef.current) {
-      void channelRef.current.track({ userId, name: displayName, ready, isHost });
+      sendEvent(channelRef.current, { type: "meta", userId, name: displayName, ready, isHost });
     }
   }, [subscribed, displayName, ready, isHost, userId]);
 
-  // Host pushes format to guests (on change + whenever someone joins).
+  // Host pushes format to guests (on change + when someone joins).
   useEffect(() => {
     if (isHost && subscribed && channelRef.current) {
-      sendEvent(channelRef.current, { type: "config", layoutId, caption });
+      sendEvent(channelRef.current, { type: "config", layoutId });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHost, subscribed, layoutId, participants.length]);
 
-  // ---- Background upload (host styling) ---------------------------------
+  // ---- Background upload (styling) --------------------------------------
   const onBgUpload = useCallback(async (file: File | undefined) => {
     if (!file) return;
     try {
@@ -186,7 +177,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     setBgImage(null);
   }, []);
 
-  // ---- Host: assemble frames then move to the styling step --------------
+  // ---- Assemble everyone's frames, then go to the styling step ----------
   const loadFrame = useCallback(async (path: string): Promise<Drawable | null> => {
     try {
       const { data } = await getSupabase().storage.from("captures").download(path);
@@ -199,7 +190,6 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
 
   const collectAndStyle = useCallback(
     async (ses: SessionStart) => {
-      if (!isHost) return;
       if (collectedRef.current === ses.sessionId) return;
       collectedRef.current = ses.sessionId;
       if (timeoutRef.current) {
@@ -211,8 +201,8 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       for (let i = 0; i < ses.shots; i++) {
         const row: Array<Drawable | null> = [];
         for (const uid of ses.order) {
-          if (uid === userId && hostOwnFramesRef.current[i]) {
-            row.push(hostOwnFramesRef.current[i]);
+          if (uid === userId && myFramesRef.current[i]) {
+            row.push(myFramesRef.current[i]);
           } else {
             const path = receivedRef.current.get(`${uid}:${i}`);
             row.push(path ? await loadFrame(path) : null);
@@ -223,23 +213,21 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       stylingSlotsRef.current = slots;
       setPhase("styling");
     },
-    [isHost, userId, loadFrame],
+    [userId, loadFrame],
   );
 
   const tryCollect = useCallback(
     (ses: SessionStart | null) => {
-      if (!ses || !isHost) return;
-      if (collectedRef.current === ses.sessionId) return;
-      // Wait for the host's own capture (if the host is a participant).
-      if (ses.order.includes(userId) && hostDoneRef.current !== ses.sessionId) return;
-      const needed = ses.order.filter((u) => u !== userId);
-      const complete = needed.every((u) => {
+      if (!ses || collectedRef.current === ses.sessionId) return;
+      if (myDoneRef.current !== ses.sessionId) return; // wait for my own capture
+      const others = ses.order.filter((u) => u !== userId);
+      const complete = others.every((u) => {
         for (let i = 0; i < ses.shots; i++) if (!receivedRef.current.has(`${u}:${i}`)) return false;
         return true;
       });
       if (complete) void collectAndStyle(ses);
     },
-    [isHost, userId, collectAndStyle],
+    [userId, collectAndStyle],
   );
 
   // ---- Capture sequence (runs on every device) --------------------------
@@ -249,10 +237,8 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       const myTurn = ses.order.includes(userId);
       if (!video || camStatus !== "ready" || !myTurn) {
         setPhase("processing");
-        if (isHost) {
-          hostDoneRef.current = ses.sessionId; // host not shooting → don't block collection
-          tryCollect(ses);
-        }
+        myDoneRef.current = ses.sessionId; // nothing to contribute
+        tryCollect(ses);
         return;
       }
       unlockAudio();
@@ -282,13 +268,10 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       }
       setShotNo(0);
       setPhase("processing");
+      myFramesRef.current = frames;
+      myDoneRef.current = ses.sessionId;
 
-      if (isHost) {
-        hostOwnFramesRef.current = frames;
-        hostDoneRef.current = ses.sessionId;
-      }
-
-      // Upload frames + announce paths (guests need these; host also persists its own).
+      // Upload my frames so peers can build their own copy; announce each path.
       const ch = channelRef.current;
       await Promise.all(
         frames.map(async (canvas, i) => {
@@ -301,72 +284,71 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
             .storage.from("captures")
             .upload(path, blob, { contentType: "image/jpeg", upsert: true });
           if (error) return;
-          if (!isHost && ch) {
+          if (ch) {
             sendEvent(ch, { type: "frame_uploaded", sessionId: ses.sessionId, userId, frameIndex: i, path });
           }
         }),
       );
 
-      if (isHost) tryCollect(ses);
+      tryCollect(ses);
     },
-    [videoRef, camStatus, userId, room.id, isHost, tryCollect],
+    [videoRef, camStatus, userId, room.id, tryCollect],
   );
-
-  const onStripReady = useCallback(async (path: string) => {
-    const { data } = await getSupabase()
-      .storage.from("strips")
-      .createSignedUrl(path, 60 * 60 * 24 * 7);
-    setResult({ url: data?.signedUrl ?? null });
-    setPhase("result");
-  }, []);
 
   // ---- Event router -----------------------------------------------------
   const handleEvent = useCallback(
     (e: RoomEvent) => {
       switch (e.type) {
-        case "config":
-          if (!isHost) {
-            setLayoutId(e.layoutId as LayoutId);
+        case "meta":
+          setPeers((prev) => ({
+            ...prev,
+            [e.userId]: { userId: e.userId, name: e.name, ready: e.ready, isHost: e.isHost },
+          }));
+          break;
+        case "sync_request":
+          if (e.from !== userId && channelRef.current) {
+            sendEvent(channelRef.current, { type: "meta", userId, name: displayName, ready, isHost });
+            if (isHost) sendEvent(channelRef.current, { type: "config", layoutId });
           }
+          break;
+        case "config":
+          if (!isHost) setLayoutId(e.layoutId as LayoutId);
           break;
         case "session_start": {
           receivedRef.current = new Map();
-          hostOwnFramesRef.current = [];
-          hostDoneRef.current = null;
+          myFramesRef.current = [];
+          myDoneRef.current = null;
           stylingSlotsRef.current = [];
           collectedRef.current = null;
-          builtRef.current = null;
           stripBlobRef.current = null;
           if (timeoutRef.current) {
             clearTimeout(timeoutRef.current);
             timeoutRef.current = null;
           }
           sessionRef.current = e;
-          setResult(null);
           setSession(e);
+          setStyleUrl((prev) => {
+            if (prev) URL.revokeObjectURL(prev);
+            return null;
+          });
           setPhase("capturing");
           void runCapture(e);
-          if (isHost) {
-            timeoutRef.current = setTimeout(() => void collectAndStyle(e), COLLECT_TIMEOUT_MS);
-          }
+          timeoutRef.current = setTimeout(() => void collectAndStyle(e), COLLECT_TIMEOUT_MS);
           break;
         }
         case "frame_uploaded": {
-          if (!isHost || e.userId === userId) return;
+          if (e.userId === userId) return;
           receivedRef.current.set(`${e.userId}:${e.frameIndex}`, e.path);
           tryCollect(sessionRef.current);
           break;
         }
-        case "strip_ready":
-          void onStripReady(e.path);
-          break;
         case "session_cancel":
           setSession(null);
           setPhase("lobby");
           break;
       }
     },
-    [isHost, userId, runCapture, collectAndStyle, tryCollect, onStripReady],
+    [userId, displayName, ready, isHost, layoutId, runCapture, collectAndStyle, tryCollect],
   );
 
   useEffect(() => {
@@ -376,7 +358,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     handlerRef.current = handleEvent;
   }, [handleEvent]);
 
-  // ---- Host styling: live-compose a preview on every style change -------
+  // ---- Styling: live-compose a preview on every style change ------------
   useEffect(() => {
     if (phase !== "styling") return;
     let cancelled = false;
@@ -404,40 +386,6 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       cancelled = true;
     };
   }, [phase, layoutId, filterId, frameId, caption, bgImage, dateStr]);
-
-  const finalizeStrip = useCallback(async () => {
-    const ses = sessionRef.current;
-    const ch = channelRef.current;
-    if (!ses || !ch || builtRef.current === ses.sessionId) return;
-    setBusy(true);
-    try {
-      let blob = stripBlobRef.current;
-      if (!blob) {
-        const res = await composeSheetMulti({
-          slots: stylingSlotsRef.current,
-          layout: getLayout(layoutId),
-          style: getFrame(frameId),
-          filterCss: getFilter(filterId).css,
-          caption: caption.trim() || "PHOTOBOOTH",
-          dateStr,
-          bgImage,
-        });
-        blob = res.blob;
-        URL.revokeObjectURL(res.url);
-      }
-      const path = `${room.id}/${ses.sessionId}.png`;
-      await getSupabase()
-        .storage.from("strips")
-        .upload(path, blob, { contentType: "image/png", upsert: true });
-      await getSupabase()
-        .from("strips")
-        .insert({ room_id: room.id, session_id: ses.sessionId, storage_path: path, created_by: userId });
-      builtRef.current = ses.sessionId;
-      sendEvent(ch, { type: "strip_ready", sessionId: ses.sessionId, path });
-    } finally {
-      setBusy(false);
-    }
-  }, [layoutId, frameId, filterId, caption, bgImage, dateStr, room.id, userId]);
 
   // ---- Host: start a synchronized session -------------------------------
   const startSession = useCallback(() => {
@@ -475,7 +423,6 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
   }, [readyIds, layoutId, room.id, userId]);
 
   const backToLobby = useCallback(() => {
-    setResult(null);
     setStyleUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
@@ -491,14 +438,13 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     () => () => {
       if (styleUrlRef.current) URL.revokeObjectURL(styleUrlRef.current);
       if (bgUrlRef.current) URL.revokeObjectURL(bgUrlRef.current);
-      if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
     },
     [],
   );
 
-  const download = useCallback(async () => {
-    if (!result?.url) return;
-    const blob = await (await fetch(result.url)).blob();
+  const download = useCallback(() => {
+    const blob = stripBlobRef.current;
+    if (!blob) return;
     const u = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = u;
@@ -507,11 +453,11 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
     a.click();
     a.remove();
     URL.revokeObjectURL(u);
-  }, [result, dateStr]);
+  }, [dateStr]);
 
   const share = useCallback(async () => {
-    if (!result?.url) return;
-    const blob = await (await fetch(result.url)).blob();
+    const blob = stripBlobRef.current;
+    if (!blob) return;
     const file = new File([blob], "photobooth.png", { type: "image/png" });
     const nav = navigator as Navigator & { canShare?: (d?: ShareData) => boolean };
     if (nav.canShare?.({ files: [file] })) {
@@ -522,8 +468,8 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
         /* cancelled */
       }
     }
-    void download();
-  }, [result, download]);
+    download();
+  }, [download]);
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:py-8">
@@ -538,37 +484,24 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        {/* LEFT — self view / preview / result */}
+        {/* LEFT — self view / preview */}
         <div className="flex min-w-0 flex-col gap-4">
-          {phase === "result" && result ? (
-            result.url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={result.url}
-                alt="Your photo strip"
-                className="mx-auto max-h-[70vh] w-auto rounded-lg shadow-2xl shadow-black/50 ring-1 ring-white/10"
-              />
-            ) : (
-              <p className="text-center text-white/60">Couldn&apos;t load the strip.</p>
-            )
-          ) : phase === "styling" && isHost ? (
+          {phase === "styling" ? (
             styleUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={styleUrl}
-                alt="Style preview"
+                alt="Your photo"
                 className="mx-auto max-h-[70vh] w-auto rounded-lg shadow-2xl shadow-black/50 ring-1 ring-white/10"
               />
             ) : (
               <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white/60">
-                Preparing your photos…
+                Developing your photo…
               </div>
             )
-          ) : phase === "processing" || phase === "styling" ? (
+          ) : phase === "processing" ? (
             <div className="flex aspect-square w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-6 text-center text-white/60">
-              {phase === "styling"
-                ? "The host is choosing the style — hang tight ✨"
-                : "Got your shots! Developing the photo…"}
+              Got everyone&apos;s shots — putting it together…
             </div>
           ) : (
             <CameraStage
@@ -695,7 +628,7 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                     </div>
                   </Section>
                   <p className="text-xs text-white/45">
-                    Filters, frames &amp; a custom background come after the shots.
+                    Everyone picks their own filter, frame &amp; background after the shots.
                   </p>
                   {notice && <p className="text-xs text-amber-300">{notice}</p>}
                   <button
@@ -721,8 +654,11 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
             </div>
           )}
 
-          {phase === "styling" && isHost && (
+          {phase === "styling" && (
             <>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white/60">
+                Make it yours — everyone can style &amp; save their own version.
+              </div>
               <Section title="Filter">
                 <ChipRow>
                   {FILTERS.map((f) => (
@@ -774,37 +710,16 @@ export default function RoomBooth({ room, userId, name, isHost }: Props) {
                   className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none placeholder:text-white/30 focus:border-pink-400"
                 />
               </Section>
-              <button onClick={() => void finalizeStrip()} disabled={busy} className="btn-primary w-full py-3">
-                {busy ? "Creating…" : "Finish photo"}
-              </button>
-            </>
-          )}
-
-          {phase === "result" && (
-            <>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/60">
-                Here you are, together. Download or share it.
-              </div>
               <div className="flex flex-col gap-2">
-                <button onClick={() => void share()} className="btn-primary w-full py-3">
+                <button onClick={() => void share()} disabled={!styleUrl} className="btn-primary w-full py-3">
                   Share
                 </button>
-                <button onClick={() => void download()} className="btn-secondary w-full py-3">
+                <button onClick={download} disabled={!styleUrl} className="btn-secondary w-full py-3">
                   Download PNG
                 </button>
-                {result?.url && (
-                  <div className="mt-1 flex flex-col items-center gap-1 rounded-2xl border border-white/10 bg-white/5 p-3">
-                    <div className="rounded bg-white p-1.5">
-                      <QRCodeSVG value={result.url} size={96} />
-                    </div>
-                    <p className="text-xs text-white/50">Scan to save on your phone</p>
-                  </div>
-                )}
-                {isHost && (
-                  <button onClick={backToLobby} className="btn-ghost">
-                    Back to lobby
-                  </button>
-                )}
+                <button onClick={backToLobby} className="btn-ghost">
+                  Back to lobby
+                </button>
               </div>
             </>
           )}
